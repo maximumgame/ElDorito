@@ -4,7 +4,6 @@
 #include "../Utils/VersionInfo.hpp"
 #include "../Modules/ModuleServer.hpp"
 
-#include <cstring>
 #include <cstdio>
 
 #include "../ElDorito.hpp"
@@ -32,6 +31,12 @@ namespace
 
 	char __fastcall Network_state_end_game_write_stats_enterHook(void* thisPtr, int unused, int a2, int a3, int a4);
 	char __fastcall Network_state_leaving_enterHook(void* thisPtr, int unused, int a2, int a3, int a4);
+
+	std::vector<Patches::Network::PongCallback> pongCallbacks;
+	void PongReceivedHook();
+
+	std::vector<Patches::Network::LifeCycleStateChangedCallback> lifeCycleStateChangedCallbacks;
+	void LifeCycleStateChangedHook();
 }
 
 namespace Patches
@@ -316,6 +321,13 @@ namespace Patches
 			// Hook leader_request_boot_machine so we can do some extra things if the boot succeeded
 			Hook(0x37E17, Network_leader_request_boot_machineHook, HookFlags::IsCall).Apply();
 
+			// Pong hook
+			Hook(0x9D9DB, PongReceivedHook).Apply();
+
+			// Lifecycle state change hook
+			Hook(0x8E527, LifeCycleStateChangedHook, HookFlags::IsCall).Apply();
+			Hook(0x8E10F, LifeCycleStateChangedHook, HookFlags::IsCall).Apply();
+
 			// Hook c_life_cycle_state_handler_end_game_write_stats's vftable ::entry method
 			DWORD temp;
 			DWORD temp2;
@@ -435,6 +447,16 @@ namespace Patches
 
 			return true;
 		}
+
+		void OnPong(PongCallback callback)
+		{
+			pongCallbacks.push_back(callback);
+		}
+
+		void OnLifeCycleStateChanged(LifeCycleStateChangedCallback callback)
+		{
+			lifeCycleStateChangedCallbacks.push_back(callback);
+		}
 	}
 }
 
@@ -461,6 +483,8 @@ namespace
 
 				if (voipvars.VarVoIPEnabled->ValueInt == 1)
 				{
+					//Make sure teamspeak is stopped before we try to start it.
+					StopTeamspeakClient();
 					//Join the Teamspeak VoIP Server so the host can talk
 					CreateThread(0, 0, StartTeamspeakClient, 0, 0, 0);
 				}
@@ -745,5 +769,48 @@ namespace
 		typedef char(__thiscall *Network_state_leaving_enterFunc)(void* thisPtr, int a2, int a3, int a4);
 		Network_state_leaving_enterFunc Network_state_leaving_enter = reinterpret_cast<Network_state_leaving_enterFunc>(0x4933E0);
 		return Network_state_leaving_enter(thisPtr, a2, a3, a4);
+	}
+
+	void PongReceivedHookImpl(const Blam::Network::NetworkAddress &from, const Blam::Network::PongPacket &pong, uint32_t latency)
+	{
+		for (auto &&callback : pongCallbacks)
+			callback(from, pong.Timestamp, pong.ID, latency);
+	}
+
+	__declspec(naked) void PongReceivedHook()
+	{
+		__asm
+		{
+			push esi // Latency
+			push edi // Pong packet
+			push dword ptr [ebp + 8] // Sender
+			call PongReceivedHookImpl
+			add esp, 12
+			push 0x49D9FA
+			ret
+		}
+	}
+
+	void LifeCycleStateChangedHookImpl(Blam::Network::LifeCycleState newState)
+	{
+		for (auto &&callback : lifeCycleStateChangedCallbacks)
+			callback(newState);
+	}
+
+	__declspec(naked) void LifeCycleStateChangedHook()
+	{
+		__asm
+		{
+			pop esi // HACK: esi = return address
+
+			// Execute replaced code
+			mov ecx, edi // ecx = New lifecycle state object
+			call dword ptr [eax + 8] // lifecycle->enter()
+
+			push dword ptr [ebx] // Lifecycle state type
+			call LifeCycleStateChangedHookImpl
+			add esp, 4
+			jmp esi
+		}
 	}
 }
