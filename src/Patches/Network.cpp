@@ -1,18 +1,21 @@
 #include "Network.hpp"
+
+#define _WINSOCK_DEPRECATED_NO_WARNINGS // TODO: Remove this and fix the deprecated calls
+#include <WinSock2.h>
+#include <WS2tcpip.h>
+#include <cstdio>
+
 #include "PlayerPropertiesExtension.hpp"
 #include "../Patch.hpp"
 #include "../Utils/VersionInfo.hpp"
 #include "../Modules/ModuleServer.hpp"
-
-#include <cstdio>
-
 #include "../ElDorito.hpp"
-
 #include "../ThirdParty/rapidjson/writer.h"
 #include "../ThirdParty/rapidjson/stringbuffer.h"
 #include "../VoIP/TeamspeakServer.hpp"
 #include "../VoIP/TeamspeakClient.hpp"
 #include "../Blam/BlamNetwork.hpp"
+#include "../Server/BanList.hpp"
 
 namespace
 {
@@ -22,6 +25,7 @@ namespace
 	char __cdecl Network_transport_secure_key_createHook(void* xnetInfo);
 	DWORD __cdecl Network_managed_session_create_session_internalHook(int a1, int a2);
 	bool __fastcall Network_leader_request_boot_machineHook(void* thisPtr, void* unused, Blam::Network::PeerInfo* peer, int reason);
+	bool __fastcall Network_session_handle_join_requestHook(Blam::Network::Session *thisPtr, void *unused, const Blam::Network::NetworkAddress &address, void *request);
 
 	bool __fastcall PeerRequestPlayerDesiredPropertiesUpdateHook(uint8_t *thisPtr, void *unused, uint32_t arg0, uint32_t arg4, void *properties, uint32_t argC);
 	void __fastcall ApplyPlayerPropertiesExtended(uint8_t *thisPtr, void *unused, int playerIndex, uint32_t arg4, uint32_t arg8, uint8_t *properties, uint32_t arg10);
@@ -176,6 +180,18 @@ namespace Patches
 						writer.Int(Pointer(0x1860454).Read<uint32_t>());
 						writer.Key("hostPlayer");
 						writer.String(Modules::ModulePlayer::Instance().VarPlayerName->ValueString.c_str());
+						writer.Key("sprintEnabled");
+						writer.String(Modules::ModuleServer::Instance().VarServerSprintEnabled->ValueString.c_str());
+						writer.Key("sprintUnlimitedEnabled");
+						writer.String(Modules::ModuleServer::Instance().VarServerSprintUnlimited->ValueString.c_str());
+						writer.Key("VoIP");
+						writer.Bool(IsVoIPServerRunning() ? TRUE : FALSE);
+
+						auto session = Blam::Network::GetActiveSession();
+						if (session && session->IsEstablished()){
+							writer.Key("teams");
+							writer.Bool(session->HasTeams());
+						}
 						writer.Key("map");
 						writer.String(Utils::String::ThinString(mapVariantName).c_str());
 						writer.Key("mapFile");
@@ -327,6 +343,9 @@ namespace Patches
 			// Lifecycle state change hook
 			Hook(0x8E527, LifeCycleStateChangedHook, HookFlags::IsCall).Apply();
 			Hook(0x8E10F, LifeCycleStateChangedHook, HookFlags::IsCall).Apply();
+
+			// Hook the join request handler to check the user's IP address against the ban list
+			Hook(0x9D0F7, Network_session_handle_join_requestHook, HookFlags::IsCall).Apply();
 
 			// Hook c_life_cycle_state_handler_end_game_write_stats's vftable ::entry method
 			DWORD temp;
@@ -617,9 +636,49 @@ namespace
 		RegisterPacket(thisPtr, packetId, packetName, arg8, newSize, newSize, serializeFunc, deserializeFunc, arg1C, arg20);
 	}
 
+	void SanitizePlayerName(wchar_t *name)
+	{
+		// Clamp the name length to 15 chars
+		name[15] = '\0';
+
+		int i, firstNonSpace = -1, lastNonSpace = -1;
+		for (i = 0; name[i]; i++)
+		{
+			// Replace non-ASCII characters with a letter corresponding to the string position
+			if (name[i] < 32 || name[i] > 126)
+				name[i] = 'A' + i;
+
+			// Replace double quotes with single quotes
+			if (name[i] == '"')
+				name[i] = '\'';
+
+			// Track the first and last non-space chars
+			if (name[i] != ' ')
+			{
+				if (firstNonSpace < 0)
+					firstNonSpace = i;
+				lastNonSpace = i;
+			}
+		}
+		if (firstNonSpace < 0)
+		{
+			// String is all spaces
+			wcscpy_s(name, 16, L"Forgot");
+			return;
+		}
+
+		// Strip the spaces from the beginning and end
+		auto newLength = lastNonSpace - firstNonSpace + 1;
+		memmove(&name[0], &name[firstNonSpace], newLength * sizeof(wchar_t));
+		name[newLength] = '\0';
+	}
+
 	// Applies player properties data including extended properties
 	void __fastcall ApplyPlayerPropertiesExtended(uint8_t *thisPtr, void *unused, int playerIndex, uint32_t arg4, uint32_t arg8, uint8_t *properties, uint32_t arg10)
 	{
+		// The player name is at the beginning of the block - sanitize it
+		SanitizePlayerName(reinterpret_cast<wchar_t*>(properties));
+
 		// Apply the base properties
 		typedef void (__thiscall *ApplyPlayerPropertiesPtr)(void *thisPtr, int playerIndex, uint32_t arg4, uint32_t arg8, void *properties, uint32_t arg10);
 		const ApplyPlayerPropertiesPtr ApplyPlayerProperties = reinterpret_cast<ApplyPlayerPropertiesPtr>(0x450890);
@@ -649,6 +708,34 @@ namespace
 		if (playerIndex >= 0)
 			kickTeamspeakClient(playerName);
 		return true;
+	}
+
+	bool __fastcall Network_session_handle_join_requestHook(Blam::Network::Session *thisPtr, void *unused, const Blam::Network::NetworkAddress &address, void *request)
+	{
+		// Convert the IP to a string
+		struct in_addr inAddr;
+		inAddr.S_un.S_addr = address.ToInAddr();
+		char ipStr[INET_ADDRSTRLEN];
+		if (inet_ntop(AF_INET, &inAddr, ipStr, sizeof(ipStr)))
+		{
+			// Check if the IP is in the ban list
+			auto banList = Server::LoadDefaultBanList();
+			if (banList.ContainsIp(ipStr))
+			{
+				// Send a join refusal
+				typedef void(__thiscall *Network_session_acknowledge_join_requestFunc)(Blam::Network::Session *thisPtr, const Blam::Network::NetworkAddress &address, int reason);
+				auto Network_session_acknowledge_join_request = reinterpret_cast<Network_session_acknowledge_join_requestFunc>(0x45A230);
+				Network_session_acknowledge_join_request(thisPtr, address, 0); // TODO: Use a special code for bans and hook the join refusal handler so we can display a message to the player
+
+				Utils::DebugLog::Instance().Log("Network", "Refused join request from banned IP %s", ipStr);
+				return true;
+			}
+		}
+
+		// Continue the join process
+		typedef bool(__thiscall *Network_session_handle_join_requestFunc)(Blam::Network::Session *thisPtr, const Blam::Network::NetworkAddress &address, void *request);
+		auto Network_session_handle_join_request = reinterpret_cast<Network_session_handle_join_requestFunc>(0x4DA410);
+		return Network_session_handle_join_request(thisPtr, address, request);
 	}
 
 	// This completely replaces c_network_session::peer_request_player_desired_properties_update

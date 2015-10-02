@@ -129,12 +129,18 @@ add_library(ElDorito SHARED
     src/Patches/RawInputPatch.cpp
     src/Patches/Scoreboard.cpp
     src/Patches/Scoreboard.hpp
+    src/Patches/Sprint.cpp
+    src/Patches/Sprint.hpp
     src/Patches/Ui.cpp
     src/Patches/Ui.hpp
     src/Patches/VirtualKeyboard.cpp
     src/Patches/VirtualKeyboard.hpp
+    src/Server/BanList.cpp
+    src/Server/BanList.hpp
     src/Server/ServerChat.cpp
     src/Server/ServerChat.hpp
+    src/Server/VariableSynchronization.cpp
+    src/Server/VariableSynchronization.hpp
     src/ThirdParty/dirent.h
     src/ThirdParty/HttpRequest.cpp
     src/ThirdParty/HttpRequest.hpp

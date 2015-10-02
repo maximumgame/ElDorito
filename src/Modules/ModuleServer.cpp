@@ -18,6 +18,8 @@
 #include "../Utils/Cryptography.hpp"
 #include "../Blam/BlamNetwork.hpp"
 #include "../Console/GameConsole.hpp"
+#include "../Server/VariableSynchronization.hpp"
+#include "../Patches/Sprint.hpp"
 
 namespace
 {
@@ -609,38 +611,38 @@ namespace
 			return false;
 		}
 
-		int peerIdx = session->MembershipInfo.FindFirstPeer();
-		while (peerIdx != -1)
+		auto membership = &session->MembershipInfo;
+		for (auto peerIdx = membership->FindFirstPeer(); peerIdx >= 0; peerIdx = membership->FindNextPeer(peerIdx))
 		{
-			int playerIdx = session->MembershipInfo.GetPeerPlayer(peerIdx);
-			if (playerIdx != -1)
+			auto playerIdx = session->MembershipInfo.GetPeerPlayer(peerIdx);
+			if (playerIdx == -1)
+				continue;
+			auto* player = &membership->PlayerSessions[playerIdx];
+
+			std::stringstream uidStream;
+			uidStream << std::hex << player->Uid;
+			auto uidString = uidStream.str();
+
+			if (Utils::String::ThinString(player->DisplayName) == kickPlayerName || uidString == kickPlayerName)
 			{
-				auto* player = &session->MembershipInfo.PlayerSessions[playerIdx];
+				typedef bool(__cdecl *Network_squad_session_boot_playerPtr)(int playerIdx, int reason);
+				auto Network_squad_session_boot_player = reinterpret_cast<Network_squad_session_boot_playerPtr>(0x437D60);
 
-				std::stringstream uidStream;
-				uidStream << std::hex << player->Uid;
-				auto uidString = uidStream.str();
-
-				if (!Utils::String::Trim(Utils::String::ThinString(player->DisplayName)).compare(kickPlayerName) || !uidString.compare(kickPlayerName))
+				// Note: this actually is a player index, not a peer index
+				if (Network_squad_session_boot_player(playerIdx, 4))
 				{
-					typedef bool(__cdecl *Network_squad_session_boot_playerPtr)(int playerIdx, int reason);
-					auto Network_squad_session_boot_player = reinterpret_cast<Network_squad_session_boot_playerPtr>(0x437D60);
-
-					if (Network_squad_session_boot_player(peerIdx, 4))
-					{
-						returnInfo = "Issued kick request for player " + kickPlayerName + " (peer: " + std::to_string(peerIdx) + " player: " + std::to_string(playerIdx) + ")";
-						return true;
-					}
-					else
-					{
-						returnInfo = "Failed to kick player " + kickPlayerName;
-						return false;
-					}
+					returnInfo = "Issued kick request for player " + kickPlayerName + " (" + std::to_string(playerIdx) + ")";
+					return true;
+				}
+				else
+				{
+					returnInfo = "Failed to kick player " + kickPlayerName;
+					return false;
 				}
 			}
-
-			peerIdx = session->MembershipInfo.FindNextPeer(peerIdx);
 		}
+
+		// Player wasn't found - 
 
 		returnInfo = "Player " + kickPlayerName + " not found in game?";
 		return false;
@@ -676,7 +678,7 @@ namespace
 				auto* player = &session->MembershipInfo.PlayerSessions[playerIdx];
 
 				std::string name = Utils::String::ThinString(player->DisplayName);
-				ss << std::dec << "(" << peerIdx << "/" << playerIdx << "): " << name << " (uid: 0x" << std::hex << player->Uid << ")" << std::endl;
+				ss << std::dec << "[" << playerIdx << "]: \"" << name << "\" (uid: " << std::hex << player->Uid << ")" << std::endl;
 			}
 
 			peerIdx = session->MembershipInfo.FindNextPeer(peerIdx);
@@ -804,6 +806,22 @@ namespace
 			break;
 		}
 	}
+
+	bool SprintEnabledChanged(const std::vector<std::string>& Arguments, std::string& returnInfo)
+	{
+		auto &serverModule = Modules::ModuleServer::Instance();
+		auto enabled = serverModule.VarServerSprintEnabledClient->ValueInt != 0;
+		Patches::Sprint::Enable(enabled);
+		return true;
+	}
+
+	bool UnlimitedSprintEnabledChanged(const std::vector<std::string>& Arguments, std::string& returnInfo)
+	{
+		auto &serverModule = Modules::ModuleServer::Instance();
+		auto unlimited = serverModule.VarServerSprintUnlimitedClient->ValueInt != 0;
+		Patches::Sprint::SetUnlimited(unlimited);
+		return true;
+	}
 }
 
 namespace Modules
@@ -848,6 +866,21 @@ namespace Modules
 		VarServerLobbyType = AddVariableInt("LobbyType", "lobbytype", "Changes the lobby type for the server. 0 = Campaign; 1 = Matchmaking; 2 = Multiplayer; 3 = Forge; 4 = Theater;", eCommandFlagsDontUpdateInitial, 2, CommandServerLobbyType);
 		VarServerMode->ValueIntMin = 0;
 		VarServerMode->ValueIntMax = 4;
+
+		VarServerSprintEnabled = AddVariableInt("SprintEnabled", "sprint", "Controls whether sprint is enabled on the server", static_cast<CommandFlags>(eCommandFlagsArchived | eCommandFlagsReplicated), 1);
+		VarServerSprintEnabledClient = AddVariableInt("SprintEnabledClient", "sprint_client", "", eCommandFlagsInternal, 1, SprintEnabledChanged);
+		Server::VariableSynchronization::Synchronize(VarServerSprintEnabled, VarServerSprintEnabledClient);
+
+		VarServerSprintUnlimited = AddVariableInt("UnlimitedSprint", "unlimited_sprint", "Controls whether unlimited sprint is enabled on the server", static_cast<CommandFlags>(eCommandFlagsArchived | eCommandFlagsReplicated), 0);
+		VarServerSprintUnlimitedClient = AddVariableInt("UnlimitedSprintClient", "unlimited_sprint_client", "", eCommandFlagsInternal, 0, UnlimitedSprintEnabledChanged);
+		Server::VariableSynchronization::Synchronize(VarServerSprintUnlimited, VarServerSprintUnlimitedClient);
+
+#ifdef _DEBUG
+		// Synchronization system testing
+		auto syncTestServer = AddVariableInt("SyncTest", "synctest", "Sync test server", eCommandFlagsHidden);
+		auto syncTestClient = AddVariableInt("SyncTestClient", "synctestclient", "Sync test client", eCommandFlagsHidden);
+		Server::VariableSynchronization::Synchronize(syncTestServer, syncTestClient);
+#endif
 
 		Patches::Network::OnPong(PongReceived);
 		Patches::Network::OnLifeCycleStateChanged(LifeCycleStateChanged);

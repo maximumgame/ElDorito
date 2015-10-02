@@ -16,7 +16,8 @@ namespace
 		std::string name = Modules::ModulePlayer::Instance().VarPlayerName->ValueString;
 
 		std::wstring nameStr = Utils::String::WidenString(name);
-		wcscpy_s(Modules::ModulePlayer::Instance().UserName, 16, nameStr.c_str());
+		wcsncpy_s(Modules::ModulePlayer::Instance().UserName, nameStr.c_str(), 16);
+		Modules::ModulePlayer::Instance().UserName[15] = 0;
 		std::string actualName = Utils::String::ThinString(Modules::ModulePlayer::Instance().UserName);
 
 		return true;
@@ -72,16 +73,17 @@ namespace Modules
 		// patch BLF save func to get the name from our field
 		Pointer::Base(0x124E6A).Write<uint32_t>((uint32_t)&this->UserName);
 
-		char* defaultNames[41] = {
+		char* defaultNames[51] = {
 			"Donut", "Penguin", "Stumpy", "Whicker", "Shadow", "Howard", "Wilshire",
 			"Darling", "Disco", "Jack", "The Bear", "Sneak", "The Big ", "Whisp",
 			"Wheezy", "Crazy", "Goat", "Pirate", "Saucy", "Hambone", "Butcher",
 			"Walla Walla", "Snake", "Caboose", "Sleepy", "Killer", "Stompy",
 			"Mopey", "Dopey", "Wease", "Ghost", "Dasher", "Grumpy", "Hollywood",
-			"Tooth", "Noodle", "King", "Cupid", "Prancer", "Pyong", "Jasper"
+			"Tooth", "Noodle", "King", "Cupid", "Prancer", "Pyong", "Jasper",
+			"Fish", "Moose", "Banana", "Peanut", "Code", "Upvote", "Commit"
 		};
 
 		srand((unsigned int)time(0));
-		Modules::CommandMap::Instance().SetVariable(VarPlayerName, std::string(defaultNames[rand() % 41]), std::string());
+		Modules::CommandMap::Instance().SetVariable(VarPlayerName, std::string(defaultNames[rand() % 51]), std::string());
 	}
 }
