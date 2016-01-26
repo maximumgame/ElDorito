@@ -676,6 +676,18 @@ namespace
 		return true;
 	}
 
+	bool CommandGameStop(const std::vector<std::string>& Arguments, std::string& returnInfo)
+	{
+		auto session = Blam::Network::GetActiveSession();
+		if (!session || !session->Parameters.SetSessionMode(1))
+		{
+			returnInfo = "Unable to stop the game!";
+			return false;
+		}
+		returnInfo = "Stopping game...";
+		return true;
+	}
+
 	bool CommandGameVersion(const std::vector<std::string>& arguments, std::string& returnInfo) {
 		returnInfo = Utils::Version::GetVersionString();
 		return true;
@@ -696,6 +708,34 @@ namespace
 	bool CommandDeleteForgeItem(const std::vector<std::string>& arguments, std::string& returnInfo)
 	{
 		Patches::Forge::SignalDelete();
+		return true;
+	}
+
+	bool CommandListMaps(const std::vector<std::string>& arguments, std::string& returnInfo)
+	{
+		WIN32_FIND_DATA find;
+		auto handle = FindFirstFile("maps\\*.map", &find);
+		if (handle == INVALID_HANDLE_VALUE)
+			return true;
+
+		// Get a list of all map names and sort them alphabetically
+		std::vector<std::string> mapNames;
+		do
+		{
+			std::string name = find.cFileName;
+			name = name.substr(0, name.length() - 4); // Remove .map extension
+			mapNames.push_back(name);
+		} while (FindNextFile(handle, &find));
+		FindClose(handle);
+		std::sort(mapNames.begin(), mapNames.end());
+
+		// Return a comma-separated list
+		for (auto&& name : mapNames)
+		{
+			if (returnInfo.length() > 0)
+				returnInfo += ',';
+			returnInfo += name;
+		}
 		return true;
 	}
 
@@ -735,13 +775,17 @@ namespace Modules
 
 		AddCommand("Start", "start", "Starts or restarts the game", eCommandFlagsNone, CommandGameStart);
 
+		AddCommand("Stop", "stop", "Stops the game, goes back to lobby", eCommandFlagsNone, CommandGameStop);
+
 		AddCommand("Version", "version", "Displays the game's version", eCommandFlagsNone, CommandGameVersion);
 
 		AddCommand("SetMenuEnabled", "set_menu", "Sets whether the menu is currently open", eCommandFlagsNone, CommandGameSetMenuEnabled);
 
 		AddCommand("DeleteForgeItem", "forge_delete", "Delete the Forge item under the crosshairs", eCommandFlagsNone, CommandDeleteForgeItem);
+
+		AddCommand("ListMaps", "maps", "List all available map files", eCommandFlagsNone, CommandListMaps);
 		
-		VarMenuURL = AddVariableString("MenuURL", "menu_url", "url(string) The URL of the page you want to load inside the menu", eCommandFlagsArchived, "http://dewmenu.halo.click/");
+		VarMenuURL = AddVariableString("MenuURL", "menu_url", "url(string) The URL of the page you want to load inside the menu", eCommandFlagsArchived, "http://scooterpsu.github.io/");
 
 		VarLanguageID = AddVariableInt("LanguageID", "languageid", "The index of the language to use", eCommandFlagsArchived, 0);
 		VarLanguageID->ValueIntMin = 0;

@@ -3,12 +3,15 @@
 #include "../ElDorito.hpp"
 #include "../Patch.hpp"
 #include "../Blam/BlamInput.hpp"
+#include "../Blam/BlamNetwork.hpp"
 #include "../Menu.hpp"
 
 namespace
 {
 	void __fastcall UI_MenuUpdateHook(void* a1, int unused, int menuIdToLoad);
+
 	int UI_ShowHalo3PauseMenu(uint32_t a1, uint32_t a2, uint32_t a3, uint32_t a4, uint32_t a5);
+	void UI_EndGame();
 	char __fastcall UI_Forge_ButtonPressHandlerHook(void* a1, int unused, uint8_t* controllerStruct);
 	char __fastcall UI_ButtonPressHandlerHook(void* a1, int unused, uint8_t* controllerStruct);
 	void LocalizedStringHook();
@@ -58,9 +61,13 @@ namespace Patches
 
 		void ApplyAll()
 		{
-			// Fix for leave game button to show H3 pause menu
-			Hook(0x3B6826, &UI_ShowHalo3PauseMenu, HookFlags::IsCall).Apply();
+			// Rewire $hq.MatchmakingLeaveQueue() to end the game
+			Hook(0x3B6826, UI_EndGame, HookFlags::IsCall).Apply();
 			Patch::NopFill(Pointer::Base(0x3B6826 + 5), 1);
+
+			// Rewire $hf2pEngine.PerformLogin() to show the pause menu
+			Hook(0x234756, &UI_ShowHalo3PauseMenu, HookFlags::IsCall).Apply();
+			Patch::NopFill(Pointer::Base(0x234756 + 5), 1);
 
 			// Allows you to press B to close the H3 pause menu
 			// TODO: find out what the byte that's being checked does, we're just patching out the check here but maybe it's important
@@ -159,16 +166,23 @@ namespace Patches
 
 			uint32_t numLevels = Pointer(levelsGlobalPtr + 0x34).Read<uint32_t>();
 
-			const wchar_t* search[6] = { L"guardian", L"riverworld", L"s3d_avalanche", L"s3d_edge", L"s3d_reactor", L"s3d_turf" };
-			const wchar_t* names[6] = { L"Guardian", L"Valhalla", L"Diamondback", L"Edge", L"Reactor", L"Icebox" };
+			const wchar_t* search[12] = { L"guardian", L"riverworld", L"s3d_avalanche", L"s3d_edge", L"s3d_reactor", L"s3d_turf", L"cyberdyne", L"chill", L"deadlock", L"bunkerworld", L"shrine", L"zanzibar" };
+			const wchar_t* names[12] = { L"Guardian", L"Valhalla", L"Diamondback", L"Edge", L"Reactor", L"Icebox", L"The Pit", L"Narrows", L"High Ground", L"Standoff", L"Sandtrap", L"Last Resort" };
 			// TODO: Get names/descs using string ids? Seems the unic tags have descs for most of the maps
-			const wchar_t* descs[6] = {
+			const wchar_t* descs[12] = {
 				L"Millennia of tending has produced trees as ancient as the Forerunner structures they have grown around. 2-6 players.",
 				L"The crew of V-398 barely survived their unplanned landing in this gorge...this curious gorge. 6-16 players.",
 				L"Hot winds blow over what should be a dead moon. A reminder of the power Forerunners once wielded. 6-16 players.",
 				L"The remote frontier world of Partition has provided this ancient databank with the safety of seclusion. 6-16 players.",
 				L"Being constructed just prior to the Invasion, its builders had to evacuate before it was completed. 6-16 players.",
-				L"Though they dominate on open terrain, many Scarabs have fallen victim to the narrow streets of Earth's cities. 4-10 players."
+				L"Though they dominate on open terrain, many Scarabs have fallen victim to the narrow streets of Earth's cities. 4-10 players.",
+				L"Software simulations are held in contempt by the veteran instructors who run these training facilities. 4-10 players.",
+				L"Without cooling systems such as these, excess heat from the Ark's forges would render the construct uninhabitable. 2-8 players.",
+				L"A relic of older conflicts, this base was reactivated after the New Mombasa Slipspace Event. 4-12 players.",
+				L"Once, nearby telescopes listened for a message from the stars. Now, these silos contain our prepared response. 4-12 players.",
+				L"Although the Brute occupiers have been driven from this ancient structure, they left plenty to remember them by. 6-16 players",
+				L"Remote industrial sites like this one are routinely requisitioned and used as part of Spartan training exercises. 4-12 players."
+
 			};
 			for (uint32_t i = 0; i < numLevels; i++)
 			{
@@ -247,6 +261,17 @@ namespace
 		Patches::Ui::DialogShow = true;
 
 		return 1;
+	}
+
+	void UI_EndGame()
+	{
+		auto session = Blam::Network::GetActiveSession();
+		if (!session || !session->IsEstablished())
+			return;
+		if (session->IsHost())
+			Blam::Network::EndGame();
+		else
+			Blam::Network::LeaveGame();
 	}
 
 	std::chrono::high_resolution_clock::time_point PrevTime = std::chrono::high_resolution_clock::now();
@@ -364,19 +389,40 @@ namespace
 		}
 	}
 
+	void ShowLanBrowser()
+	{
+		typedef void*(__cdecl * UI_AllocPtr)(int size);
+		auto UI_Alloc = reinterpret_cast<UI_AllocPtr>(0xAB4ED0);
+		typedef void*(__fastcall* c_load_game_browser_screen_messagePtr)(void *thisPtr, int unused, int arg0, int arg1, int arg2, int arg3, int arg4, int arg5);
+		auto c_load_game_browser_screen_message = reinterpret_cast<c_load_game_browser_screen_messagePtr>(0xADE0B0);
+		typedef void(*UI_Dialog_QueueLoadPtr)(void *dialog);
+		auto UI_Dialog_QueueLoad = reinterpret_cast<UI_Dialog_QueueLoadPtr>(0xA93450);
+
+		auto dialog = UI_Alloc(0x44);
+		if (!dialog)
+			return;
+		dialog = c_load_game_browser_screen_message(dialog, 0, 0x10355, 0, 4, 0x1000C, 0, 0);
+		if (dialog)
+			UI_Dialog_QueueLoad(dialog);
+	}
+
 	bool MainMenuCreateLobbyHook(int lobbyType)
 	{
 		// If matchmaking is selected, show the server browser instead
 		// TODO: Really need to map out the ui_game_mode enum...
-		if (lobbyType == 1)
+		switch (lobbyType)
 		{
+		case 1: // Matchmaking
 			Menu::Instance().setEnabled(true);
 			return true;
+		case 4: // Theater (rip)
+			ShowLanBrowser();
+			return true;
+		default:
+			typedef bool(*CreateLobbyPtr)(int lobbyType);
+			auto CreateLobby = reinterpret_cast<CreateLobbyPtr>(0xA7EE70);
+			return CreateLobby(lobbyType);
 		}
-
-		typedef bool(*CreateLobbyPtr)(int lobbyType);
-		auto CreateLobby = reinterpret_cast<CreateLobbyPtr>(0xA7EE70);
-		return CreateLobby(lobbyType);
 	}
 
 	// Fix to ignore duplicate button presses when using keyboard

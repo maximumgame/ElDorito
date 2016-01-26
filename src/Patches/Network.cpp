@@ -26,6 +26,7 @@ namespace
 	DWORD __cdecl Network_managed_session_create_session_internalHook(int a1, int a2);
 	bool __fastcall Network_leader_request_boot_machineHook(void* thisPtr, void* unused, Blam::Network::PeerInfo* peer, int reason);
 	bool __fastcall Network_session_handle_join_requestHook(Blam::Network::Session *thisPtr, void *unused, const Blam::Network::NetworkAddress &address, void *request);
+	int Network_GetMaxPlayersHook();
 
 	bool __fastcall PeerRequestPlayerDesiredPropertiesUpdateHook(uint8_t *thisPtr, void *unused, uint32_t arg0, uint32_t arg4, void *properties, uint32_t argC);
 	void __fastcall ApplyPlayerPropertiesExtended(uint8_t *thisPtr, void *unused, int playerIndex, uint32_t arg4, uint32_t arg8, uint8_t *properties, uint32_t arg10);
@@ -376,6 +377,9 @@ namespace Patches
 				writeAddr.Write<uint32_t>((uint32_t)&Network_state_leaving_enterHook);
 				VirtualProtect(writeAddr, 4, temp, &temp2);
 			}
+
+			// Set the max player count to Server.MaxPlayers when hosting a lobby
+			Hook(0x67FA0D, Network_GetMaxPlayersHook, HookFlags::IsCall).Apply();
 		}
 
 		void ForceDedicated()
@@ -387,6 +391,23 @@ namespace Patches
 			Patch(0x12D62E, { 0xEB }).Apply();
 			Patch(0x12D67A, { 0xEB }).Apply();
 			Patch(0x5A8BB, { 0xEB }).Apply();
+
+			// Crash fixes
+			Patch(0xC9C5E0, { 0xC2, 0x08, 0x00 }).Apply();
+			Patch(0x378C0, { 0xB0, 0x00, 0x90, 0x90, 0x90 }).Apply();
+			Patch(0x62E636, { 0x33, 0xFF }).Apply();
+
+			// Forces the game to use a null d3d device
+			Patch(0x2EBBB, { 0x1 }).Apply();
+
+			// Fixes an exception that happens with null d3d
+			Patch(0x675E30, { 0xC3 }).Apply();
+
+			// Fixes the game being stuck in some d3d-related while loop
+			Patch(0x622290, { 0xC3 }).Apply();
+
+			// Stops D3DDevice->EndScene from being called
+			Patch(0x621796, 0x90, 6).Apply(); // TODO: set eax?
 		}
 
 		bool StartRemoteConsole()
@@ -636,41 +657,48 @@ namespace
 		RegisterPacket(thisPtr, packetId, packetName, arg8, newSize, newSize, serializeFunc, deserializeFunc, arg1C, arg20);
 	}
 
+	// ASCII chars that can't appear in names
+	const wchar_t DisallowedNameChars[] = { '\'', '\"' };
+
 	void SanitizePlayerName(wchar_t *name)
 	{
-		// Clamp the name length to 15 chars
-		name[15] = '\0';
-
-		int i, firstNonSpace = -1, lastNonSpace = -1;
-		for (i = 0; name[i]; i++)
+		int i, dest = 0;
+		auto space = false;
+		for (i = 0; i < 15 && dest < 15 && name[i]; i++)
 		{
-			// Replace non-ASCII characters with a letter corresponding to the string position
-			if (name[i] < 32 || name[i] > 126)
-				name[i] = 'A' + i;
-
-			// Replace double quotes with single quotes
-			if (name[i] == '"')
-				name[i] = '\'';
-
-			// Track the first and last non-space chars
-			if (name[i] != ' ')
+			auto allowed = false;
+			if (name[i] > 32 && name[i] < 127)
 			{
-				if (firstNonSpace < 0)
-					firstNonSpace = i;
-				lastNonSpace = i;
+				// ASCII characters are allowed if they aren't in the disallowed list
+				allowed = true;
+				for (auto ch : DisallowedNameChars)
+				{
+					if (name[i] == ch)
+					{
+						allowed = false;
+						break;
+					}
+				}
+			}
+			else if (name[i] == ' ' && dest > 0)
+			{
+				// If this isn't at the beginning of the string, indicate that
+				// a space should be inserted before the next allowed character
+				space = true;
+			}
+			if (allowed)
+			{
+				if (space)
+				{
+					name[dest++] = ' ';
+					space = false;
+				}
+				name[dest++] = name[i];
 			}
 		}
-		if (firstNonSpace < 0)
-		{
-			// String is all spaces
+		memset(&name[dest], 0, (16 - dest) * sizeof(wchar_t));
+		if (dest == 0)
 			wcscpy_s(name, 16, L"Forgot");
-			return;
-		}
-
-		// Strip the spaces from the beginning and end
-		auto newLength = lastNonSpace - firstNonSpace + 1;
-		memmove(&name[0], &name[firstNonSpace], newLength * sizeof(wchar_t));
-		name[newLength] = '\0';
 	}
 
 	// Applies player properties data including extended properties
@@ -736,6 +764,12 @@ namespace
 		typedef bool(__thiscall *Network_session_handle_join_requestFunc)(Blam::Network::Session *thisPtr, const Blam::Network::NetworkAddress &address, void *request);
 		auto Network_session_handle_join_request = reinterpret_cast<Network_session_handle_join_requestFunc>(0x4DA410);
 		return Network_session_handle_join_request(thisPtr, address, request);
+	}
+
+	int Network_GetMaxPlayersHook()
+	{
+		int maxPlayers = Modules::ModuleServer::Instance().VarServerMaxPlayers->ValueInt;
+		return Utils::Clamp(maxPlayers, 1, 16);
 	}
 
 	// This completely replaces c_network_session::peer_request_player_desired_properties_update

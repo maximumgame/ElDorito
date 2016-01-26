@@ -71,7 +71,6 @@ void ElDorito::Initialize()
 	int numArgs = 0;
 	LPWSTR* szArgList = CommandLineToArgvW(GetCommandLineW(), &numArgs);
 	bool usingLauncher = Modules::ModuleGame::Instance().VarSkipLauncher->ValueInt == 1;
-	bool skipKill = false;
 	bool dedicated = false;
 
 	if( szArgList && numArgs > 1 )
@@ -89,16 +88,10 @@ void ElDorito::Initialize()
 				usingLauncher = true;
 #endif
 
-#ifdef _DEBUG
 			if (arg.compare(L"-dedicated") == 0)
 			{
 				dedicated = true;
-			}
-#endif
-
-			if (arg.compare(L"-multiInstance") == 0)
-			{
-				skipKill = true;
+				usingLauncher = true;
 			}
 
 			size_t pos = arg.find(L"=");
@@ -138,14 +131,6 @@ void ElDorito::Initialize()
 		TerminateProcess(GetCurrentProcess(), 0);
 	}
 #endif
-
-	if (!skipKill)
-	{
-		int ourPid = GetCurrentProcessId();
-		killProcessByName("eldorado.exe", ourPid);
-		killProcessByName("custom_menu.exe", ourPid);
-		killProcessByName("DewritoUpdater.exe", ourPid);
-	}
 
 	// Ensure a ban list file exists
 	Server::SaveDefaultBanList(Server::LoadDefaultBanList());
