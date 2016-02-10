@@ -94,17 +94,22 @@ namespace Blam
 			static const bool Value = sizeof(test(std::declval<T>())) == sizeof(yes);
 		};
 
+		inline void *GetTagAddress(uint32_t group, uint32_t index)
+		{
+			typedef void *(*GetTagAddressPtr)(int groupTag, uint32_t index);
+			auto GetTagAddressImpl = reinterpret_cast<GetTagAddressPtr>(0x503370);
+			return GetTagAddressImpl(group, index);
+		}
+
 		// Gets a tag by index.
 		template<class TagType>
-		TagType* GetTag(uint32_t index)
+		TagType *GetTag(uint32_t index)
 		{
 			static_assert(IsTagType<TagType>::Value, "Cannot call GetTag() on a non-tag type");
+
 			if (index != 0xFFFFFFFF)
-			{
-				typedef TagType* (*GetTagAddressPtr)(int groupTag, uint32_t index);
-				auto GetTagAddress = reinterpret_cast<GetTagAddressPtr>(0x503370);
-				return GetTagAddress(TagType::GroupTag, index);
-			}
+				return reinterpret_cast<TagType *>(GetTagAddress(TagType::GroupTag, index));
+
 			return nullptr;
 		}
 	}
